@@ -1,0 +1,14 @@
+Migrate,ManagementPack,MatchPattern,Action,Tier,Reason
+Y,Contoso EHR Application Monitoring,Contoso.EHR.*,MIGRATE,1,Custom application monitoring - still in use
+Y,Contoso Web Farm Groups,Contoso.WebFarm.Groups,MIGRATE,1,Server groups used by subscriptions and overrides
+Y,Contoso Line-of-Business Services,Contoso.LOB*Services,MIGRATE,1,Service monitors for in-house apps
+Y,Contoso Shared Library (sealed),Contoso.Shared.Library,MIGRATE,1,Our own sealed library - needs the original .mp
+Y,Fabrikam Storage Array,Fabrikam.Storage.*,VENDOR_SEALED,2,Vendor pack - import from the vendor's .mpb only
+Y,Northwind Network Devices,Northwind.Network.Library,VENDOR_SEALED,2,Community pack still used for switch monitoring
+N,Fabrikam Legacy Backup 2012,Fabrikam.Backup.2012*,VENDOR_SEALED,2,Product retired - do not move
+N,Windows Server Overrides,Contoso.Windows.Server.Overrides,OVERRIDES,3,Tuning - turn on with EnableOverrides if you want it
+N,SQL Server Overrides,Contoso.SQLServer.Overrides,OVERRIDES,3,Tuning - overrides on retired SQL packs are stripped automatically
+N,Contoso Production Servers,Contoso.Production.Servers,OVERRIDES,3,Per-server overrides - run MapInstances first
+N,Default Management Pack,Microsoft.SystemCenter.OperationsManager.DefaultUser,SKIP,-,Never migrate the Default MP - move its overrides into real override packs first
+N,Contoso Test Shell,Contoso.Test.Shell,SKIP,-,Empty pack
+N,SQL Server 2012 Overrides,Contoso.SQL2012.Overrides,SKIP,-,Target pack retired

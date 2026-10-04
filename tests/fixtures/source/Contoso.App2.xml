@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest><Identity><ID>Contoso.App2</ID><Version>1.0.0.0</Version></Identity><Name>Contoso.App2</Name><References><Reference Alias="Lib"><ID>Contoso.Custom.Library</ID><Version>2.0.0.0</Version><PublicKeyToken>31bf3856ad364e35</PublicKeyToken></Reference><Reference Alias="System"><ID>System.Library</ID><Version>7.5.8501.0</Version><PublicKeyToken>31bf3856ad364e35</PublicKeyToken></Reference></References></Manifest>
+  <TypeDefinitions><EntityTypes><ClassTypes><ClassType ID="Contoso.App2.Thing" Accessibility="Public" Abstract="false" Base="Lib!Contoso.Lib.Base" Hosted="false" Singleton="false" /></ClassTypes></EntityTypes></TypeDefinitions>
+  <LanguagePacks><LanguagePack ID="ENU" IsDefault="true"><DisplayStrings><DisplayString ElementID="Contoso.App2"><Name>Contoso.App2 display</Name></DisplayString></DisplayStrings></LanguagePack></LanguagePacks>
+</ManagementPack>

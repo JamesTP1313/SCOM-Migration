@@ -1,0 +1,20 @@
+# Migration working data -- never commit a real environment's exports or results
+Source/
+Target/
+Compile/
+Source*/
+Target*/
+InstanceMap.csv
+MigrationManifest.csv
+!examples/MigrationManifest.example.csv
+!tests/fixtures/MigrationManifest.csv
+*.zip
+*.log
+GroupTest-*.csv
+WhyBlocked-*.txt
+Check-Report.txt
+Rollback-*.csv
+ImportResults_*.csv
+ImportErrors_*.txt
+*.mp
+*.mpb

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest><Identity><ID>Microsoft.Windows.Server.2016.Monitoring</ID><Version>10.1.0.3</Version></Identity><Name>Microsoft.Windows.Server.2016.Monitoring</Name><References></References></Manifest>
+  <Monitoring><Monitors><UnitMonitor ID="Microsoft.Windows.Server.2016.LogicalDisk.FreeSpace" Accessibility="Public" Enabled="true" Target="Windows!Microsoft.Windows.Computer" ParentMonitorID="Health!System.Health.AvailabilityState" Remotable="true" Priority="Normal" TypeID="X" ConfirmDelivery="false"><Category>AvailabilityHealth</Category><OperationalStates/><Configuration/></UnitMonitor></Monitors><Rules><Rule ID="Microsoft.Windows.Server.2016.CPU.Collection" Enabled="true" Target="Windows!Microsoft.Windows.Computer"><Category>PerformanceCollection</Category><DataSources/><WriteActions/></Rule></Rules></Monitoring>
+  <LanguagePacks><LanguagePack ID="ENU" IsDefault="true"><DisplayStrings><DisplayString ElementID="Microsoft.Windows.Server.2016.Monitoring"><Name>Microsoft.Windows.Server.2016.Monitoring display</Name></DisplayString></DisplayStrings></LanguagePack></LanguagePacks>
+</ManagementPack>

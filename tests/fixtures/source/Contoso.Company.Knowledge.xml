@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest><Identity><ID>Contoso.Company.Knowledge</ID><Version>1.0.0.0</Version></Identity><Name>Contoso.Company.Knowledge</Name><References><Reference Alias="SQL12D"><ID>Microsoft.SQLServer.2012.Discovery</ID><Version>6.7.2.0</Version><PublicKeyToken>31bf3856ad364e35</PublicKeyToken></Reference><Reference Alias="Windows"><ID>Microsoft.Windows.Library</ID><Version>7.5.8501.0</Version><PublicKeyToken>31bf3856ad364e35</PublicKeyToken></Reference></References></Manifest>
+  <Categories><Category ID="Cat.Dead" Target="SQL12D!Microsoft.SQLServer.2012.Database" Value="X"/><Category ID="Cat.OK" Target="Windows!Microsoft.Windows.Computer" Value="Y"/></Categories><Presentation><Folders><Folder ID="Contoso.Folder" Accessibility="Public" ParentFolder="Windows!Microsoft.Windows.Computer"/></Folders></Presentation>
+  <LanguagePacks><LanguagePack ID="ENU" IsDefault="true"><DisplayStrings><DisplayString ElementID="Contoso.Company.Knowledge"><Name>Contoso.Company.Knowledge display</Name></DisplayString><DisplayString ElementID="Cat.OK"><Name>Café’s “quoted” name — ñ</Name></DisplayString></DisplayStrings></LanguagePack></LanguagePacks>
+</ManagementPack>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest><Identity><ID>Contoso.Empty.Shell</ID><Version>1.0.0.0</Version></Identity><Name>Contoso.Empty.Shell</Name><References></References></Manifest>
+  
+  <LanguagePacks><LanguagePack ID="ENU" IsDefault="true"><DisplayStrings><DisplayString ElementID="Contoso.Empty.Shell"><Name>Contoso.Empty.Shell display</Name></DisplayString></DisplayStrings></LanguagePack></LanguagePacks>
+</ManagementPack>

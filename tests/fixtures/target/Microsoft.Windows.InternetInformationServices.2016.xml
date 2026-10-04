@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest><Identity><ID>Microsoft.Windows.InternetInformationServices.2016</ID><Version>10.0.9.0</Version></Identity><Name>Microsoft.Windows.InternetInformationServices.2016</Name><References></References></Manifest>
+  <TypeDefinitions><EntityTypes><ClassTypes><ClassType ID="Microsoft.Windows.InternetInformationServices.2016.WebSite" Accessibility="Public" Abstract="false" Base="System!System.LogicalEntity" Hosted="false" Singleton="false" /></ClassTypes></EntityTypes></TypeDefinitions><Monitoring><Monitors><UnitMonitor ID="Microsoft.Windows.InternetInformationServices.2016.WebSite.Status" Accessibility="Public" Enabled="true" Target="IIS!Microsoft.Windows.InternetInformationServices.2016.WebSite" TypeID="X"/></Monitors></Monitoring>
+  <LanguagePacks><LanguagePack ID="ENU" IsDefault="true"><DisplayStrings><DisplayString ElementID="Microsoft.Windows.InternetInformationServices.2016"><Name>Microsoft.Windows.InternetInformationServices.2016 display</Name></DisplayString></DisplayStrings></LanguagePack></LanguagePacks>
+</ManagementPack>

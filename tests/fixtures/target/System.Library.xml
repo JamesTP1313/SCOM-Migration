@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ManagementPack ContentReadable="true" SchemaVersion="2.0" OriginalSchemaVersion="1.1" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+  <Manifest><Identity><ID>System.Library</ID><Version>7.5.8501.0</Version></Identity><Name>System.Library</Name><References></References></Manifest>
+  <TypeDefinitions><EntityTypes><ClassTypes><ClassType ID="System.Entity" Accessibility="Public" Abstract="true" Base="System.Entity" Hosted="false" Singleton="false" /><ClassType ID="System.LogicalEntity" Accessibility="Public" Abstract="true" Base="System.Entity" Hosted="false" Singleton="false" /></ClassTypes><EnumerationTypes><EnumerationValue ID="System.Internal.ManagementPack" Accessibility="Public"/></EnumerationTypes></EntityTypes></TypeDefinitions>
+  <LanguagePacks><LanguagePack ID="ENU" IsDefault="true"><DisplayStrings><DisplayString ElementID="System.Library"><Name>System.Library display</Name></DisplayString></DisplayStrings></LanguagePack></LanguagePacks>
+</ManagementPack>

@@ -1,0 +1,12 @@
+Migrate,ManagementPack,MatchPattern,Action,Tier
+Y,Contoso.Custom.Overrides,Contoso.Custom.Overrides,OVERRIDES,3
+Y,Contoso.EHR.Application,Contoso.EHR*Application,MIGRATE,1
+Y,Contoso.SQL.Server.Group.All,Contoso.SQL.Server.Group.All,MIGRATE,1
+Y,Contoso.App2,Contoso.App2,MIGRATE,1
+Y,Contoso.Custom.Library,Contoso.Custom.Library,MIGRATE,1
+Y,Contoso.Company.Knowledge,Contoso.Company.Knowledge,MIGRATE,1
+Y,Does.Not.Exist,Does.Not.Exist,MIGRATE,1
+N,Contoso.Empty.Shell,Contoso.Empty.Shell,SKIP,X
+N,Microsoft.SQLServer.2012.Discovery,Microsoft.SQLServer.2012.Discovery,SKIP,X
+Y,Contoso.Rule.Removed,Contoso.Rule.Removed,MIGRATE,1
+N,Contoso.Windows.Server.Overrides,Contoso.Windows.Server.Overrides,OVERRIDES,3
