@@ -18,6 +18,7 @@ No SCOM is needed:
 ```powershell
 pwsh ./tests/Invoke-SmokeTest.ps1               # PowerShell 7, any OS
 powershell -File .\tests\Invoke-SmokeTest.ps1   # Windows PowerShell 5.1
+pwsh ./tests/Invoke-NotificationsTest.ps1       # notifications script
 ```
 
 The smoke test:
@@ -27,7 +28,7 @@ The smoke test:
 - runs every non-destructive step with `tests/mocks/target`;
 - asserts the verdicts, stripping, group conversion and override re-pointing.
 
-Every PR must keep it green. A PR that changes behaviour must add a fixture MP and an assertion that cover the change.
+Every PR must keep both tests green. A PR that changes behaviour must add a fixture MP and an assertion that cover the change.
 
 ## Code rules
 

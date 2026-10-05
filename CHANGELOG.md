@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.41.0
+
+### Added: notification migration (`src/Migrate-ScomNotifications.ps1`, script version 2.0.4)
+- Moves notification channels, subscribers and subscriptions to a target with no notification config yet. It moves the `Microsoft.SystemCenter.Notifications.Internal` MP as a whole, so criteria, class/group scope, CC/BCC, schedules and SMTP settings come over unchanged.
+- Steps: `Export` (source, read only), `Prepare` (target, read only; `READY`/`BLOCKED`), `Import` (type `YES`), `Verify`, `Enable`, `Disable`.
+- Every subscription is imported disabled, and Import disables anything that arrives enabled. Enable skips subscriptions whose scope couldn't be found on the target unless `-Force` is given.
+- Per-server scope is re-pointed by FullName. MP references are set to the target's versions, and the MP version is set above the target's own copy, which is backed up first.
+- Import refuses a prepared file that changed after Prepare.
+- A subscription stored in another MP is reported in `NotInThisMp.csv` as a warning, not a blocker.
+- Prepare stops if the subscription inventory looks damaged.
+- One-item lists are handled correctly on Windows PowerShell 5.1 under `Set-StrictMode -Version Latest`.
+- Added `tests/Invoke-NotificationsTest.ps1` (7 scenarios, offline) and `docs/notifications.md`.
+- The README and known limits no longer list notifications as out of scope.
+
 ## 3.40.0 (first public release)
 
 This is the code used for a production SCOM 2016 → 2025 migration, prepared for publishing. The compile and import logic is identical to the production build. A regression run on the same inputs produced identical verdicts, candidate MPs and group conversions.
