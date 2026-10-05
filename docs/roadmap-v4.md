@@ -134,5 +134,6 @@ SDK notes:
 | 7 | Split `MPMigration.ps1` (≈5,800 lines) into a module | `ScomMigration.psm1` + thin scripts. Do this after 1–6, so behaviour is pinned by tests first. |
 | 8 | `-UseElementMaps` | §4, optional |
 | 9 | Signed release zip + PowerShell Gallery package | Many SCOM servers require signed scripts |
+| 10 | `CookdownCheck` step | Read-only pre-migration report. It flags script data sources (PowerShell, VBScript, JScript), OleDb and TCP probes, script configuration that uses per-instance values (`$Target/...$`), and per-object overrides on `IntervalSeconds`, `TimeoutSeconds` or `SyncTime` that split a cooked-down workflow. The toolkit never changes workflows, so this reports problems carried over from the source; it never fixes them. |
 
-Items 1 to 3 are the minimum for v4.0. Items 4 to 6 come before anyone calls a new pair "Supported". Items 7 to 9 can come in 4.x.
+Items 1 to 3 and 10 are the minimum for v4.0. Items 4 to 6 come before anyone calls a new pair "Supported". Items 7 to 9 can come in 4.x.
