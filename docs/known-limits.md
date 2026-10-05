@@ -16,8 +16,9 @@ Read this page before you rely on the toolkit for a migration of your own.
 
 ## What isn't migrated
 
-- Notification subscriptions, subscribers and channels; Run As accounts and profiles; connectors; maintenance schedules; user roles; agent assignment and management-server failover; and Operations Console dashboards or reports that live outside MPs.
+- Run As accounts and profiles; connectors; maintenance schedules; user roles; agent assignment and management-server failover; and Operations Console dashboards or reports that live outside MPs.
 - Data: alerts, performance history, state history and the data warehouse.
+- Notification channels, subscribers and subscriptions are handled by a separate script. Its limits are in [Notifications](notifications.md#known-limits).
 
 ## Rewrites the toolkit won't do
 

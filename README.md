@@ -39,7 +39,7 @@ It was built for and used on a production **SCOM 2016 → SCOM 2025** migration 
 ## What it doesn't do
 
 - It doesn't rewrite MPs to use Microsoft's *replacement* packs. A custom monitor that targets a SQL 2012 class is reported as BLOCKED, not re-targeted. Element IDs changed between those packs, so a blind rewrite would produce MPs that import but monitor nothing.
-- It doesn't migrate notification subscriptions, channels, Run As accounts, maintenance schedules, dashboards outside MPs, or agent assignments.
+- It doesn't migrate Run As accounts, maintenance schedules, dashboards outside MPs, or agent assignments. Notification channels, subscribers and subscriptions have their own script; see [Notifications](#notifications).
 - It never writes to the source management group. The source side only calls `Get-*` and `Export-SCOMManagementPack`.
 - It doesn't import anything until you run the import step, and the import asks you to type `YES`.
 
@@ -102,27 +102,44 @@ It was built for and used on a production **SCOM 2016 → SCOM 2025** migration 
 
 Every step is one word because the toolkit was built for a locked-down server where every command had to be typed by hand.
 
+## Notifications
+
+`src/Migrate-ScomNotifications.ps1` moves notification channels, subscribers and subscriptions to a target that has none yet. It moves the `Notifications.Internal` MP as a whole, so criteria, scope, CC/BCC, schedules and SMTP settings come over intact. Every subscription arrives **disabled**, and you enable them yourself when you're ready.
+
+```powershell
+.\Migrate-ScomNotifications.ps1 -Step Export      # on the source MS
+.\Migrate-ScomNotifications.ps1 -Step Prepare     # on the target MS; READY/BLOCKED, imports nothing
+.\Migrate-ScomNotifications.ps1 -Step Import      # asks you to type YES; everything arrives disabled
+.\Migrate-ScomNotifications.ps1 -Step Enable -Name 'Ops - Critical'
+.\Migrate-ScomNotifications.ps1 -Step Disable -All   # emergency stop
+```
+
+See [docs/notifications.md](docs/notifications.md).
+
 ## Documentation
 
 - [How it works](docs/how-it-works.md): the compile model, stripping, sealed vs. unsealed, READY/BLOCKED, group conversion, per-server overrides
 - [Step reference](docs/step-reference.md): every step, every output file, the manifest and the direct `MPMigration.ps1` parameters
 - [Troubleshooting](docs/troubleshooting.md)
 - [Known limits](docs/known-limits.md)
+- [Notifications](docs/notifications.md): channels, subscribers and subscriptions
 - [Roadmap: v4.0, any supported version → any supported version](docs/roadmap-v4.md)
 
 ## Repository layout
 
 ```
-src/        MPMigration.ps1, Export-ScomEnvironment.ps1, Invoke-ScomMigrationStep.ps1
+src/        MPMigration.ps1, Export-ScomEnvironment.ps1, Invoke-ScomMigrationStep.ps1,
+            Migrate-ScomNotifications.ps1
 examples/   MigrationManifest.example.csv, Migration.settings.psd1
-docs/       how-it-works, step-reference, troubleshooting, known-limits, roadmap-v4
-tests/      offline smoke test: synthetic MPs + stand-in OperationsManager modules
+docs/       how-it-works, step-reference, troubleshooting, known-limits, notifications, roadmap-v4
+tests/      offline tests: synthetic MPs + stand-in OperationsManager cmdlets
 ```
 
 ## Testing without SCOM
 
 ```powershell
-pwsh ./tests/Invoke-SmokeTest.ps1
+pwsh ./tests/Invoke-SmokeTest.ps1           # MP migration
+pwsh ./tests/Invoke-NotificationsTest.ps1   # notifications
 ```
 
 This runs the full pipeline: source export, Check, FixReview, EnableOverrides, MapInstances, Compile, WhyBlocked, OverrideReport, DryRun and TestGroups. It uses synthetic MPs and mocked SCOM cmdlets, then checks the verdicts, stripping, group conversion and override re-pointing. It runs on Windows, Linux or macOS. See [CONTRIBUTING](CONTRIBUTING.md).
