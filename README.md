@@ -7,12 +7,12 @@ Move custom management packs from an old System Center Operations Manager (SCOM)
 It was built for and used on a production **SCOM 2016 → SCOM 2025** migration of several hundred MPs. That is the only path tested end to end so far. Other source and target versions are on the [v4.0 roadmap](docs/roadmap-v4.md).
 
 ```
- OLD management group                      NEW management group
+ OLD management group                      NEW management group  (you work here)
  ─────────────────────                     ─────────────────────
- Export-ScomEnvironment.ps1 -Role Source   Export-ScomEnvironment.ps1 -Role Target
-            │                                          │
-            └──────────── copy both folders ───────────┘
-                                 │
+ export runs here with its own   ◄──────── Invoke-ScomMigrationStep.ps1 ExportSource
+ OperationsManager module ──── remoting ──► Source\
+                                           Invoke-ScomMigrationStep.ps1 ExportTarget
+                                                       │
                  Invoke-ScomMigrationStep.ps1 Compile   (MPMigration.ps1 does the work)
                                  │
               READY / BLOCKED per MP  +  Import-Batch.<ver>.ps1
@@ -40,7 +40,7 @@ It was built for and used on a production **SCOM 2016 → SCOM 2025** migration 
 
 - It doesn't rewrite MPs to use Microsoft's *replacement* packs. A custom monitor that targets a SQL 2012 class is reported as BLOCKED, not re-targeted. Element IDs changed between those packs, so a blind rewrite would produce MPs that import but monitor nothing.
 - It doesn't migrate Run As accounts, maintenance schedules, dashboards outside MPs, or agent assignments. Notification channels, subscribers and subscriptions have their own script; see [Notifications](#notifications).
-- It never writes to the source management group. The source side only calls `Get-*` and `Export-SCOMManagementPack`.
+- It never writes to the source management group. The source side only calls `Get-*` and `Export-SCOMManagementPack`. With `ExportSource`, the only thing created on the source server is a temporary folder, which is removed afterwards.
 - It doesn't import anything until you run the import step, and the import asks you to type `YES`.
 
 ## Requirements
@@ -48,46 +48,36 @@ It was built for and used on a production **SCOM 2016 → SCOM 2025** migration 
 | | |
 |---|---|
 | PowerShell | Windows PowerShell 5.1 on the management servers (PowerShell 7 works for the offline tests) |
-| SCOM module | The `OperationsManager` module **of each environment**. Run the source export on the old MS and everything else on the new MS. A newer console can't connect to an older management group. |
+| SCOM module | The `OperationsManager` module **of each environment**. A newer console can't connect to an older management group, so the source export runs on the old MS, either started from the new MS through PowerShell remoting (`ExportSource`) or run there by hand. |
+| Remoting | For `ExportSource`: PowerShell remoting (WinRM) from the new MS to the old MS, as an administrator there. Check with `Test-WSMan <old MS>`. Without it, export on the old MS and copy the folder. |
 | Rights | SCOM Administrator on the target for import. Read access on the source. |
 | Sealed MPs | The original `.mp`/`.mpb` files for every in-scope sealed MP: vendor packs and your own sealed libraries |
 | `.mp`/`.mpb` reading | The SCOM SDK assemblies, present on any management server |
 
 ## Quick start
 
-1. **Download** `src/` and copy it to a working folder on each management server. Then unblock the files:
+Everything below runs on the **new** management server.
+
+1. **Download** `src/` into a working folder, for example `C:\SCOMMigration`, and unblock the files:
 
    ```powershell
    Get-ChildItem *.ps1 | Unblock-File
    ```
 
-2. **Write your manifest.** Start from [`examples/MigrationManifest.example.csv`](examples/MigrationManifest.example.csv). One row per MP, and only rows with `Migrate = Y` are moved. See [Manifest format](docs/step-reference.md#the-manifest).
+2. **Write your manifest.** Start from [`examples/MigrationManifest.example.csv`](examples/MigrationManifest.example.csv) and save it as `MigrationManifest.csv` in the working folder. One row per MP, and only rows with `Migrate = Y` are moved. See [Manifest format](docs/step-reference.md#the-manifest).
 
-3. **Export the source**, on the old management server:
-
-   ```powershell
-   .\Export-ScomEnvironment.ps1 -Role Source -Manifest .\MigrationManifest.csv `
-       -OutputFolder D:\SCOMMigration\Source -SealedSearchPath '\\fileserver\MPs'
-   ```
-
-4. **Export the target**, on the new management server. Install the current Microsoft packs you rely on first (Windows Server, SQL, IIS…).
+3. **Export both management groups.** Install the current Microsoft packs you rely on in the new one first (Windows Server, SQL, IIS…).
 
    ```powershell
-   .\Export-ScomEnvironment.ps1 -Role Target -OutputFolder D:\SCOMMigration\Target
+   .\Invoke-ScomMigrationStep.ps1 ExportSource -SourceServer OLDSCOM01 -SealedSearchPath '\\fileserver\MPs'
+   .\Invoke-ScomMigrationStep.ps1 ExportTarget
    ```
 
-5. **Lay out the working folder on the new MS:**
+   `ExportSource` runs the export **on** the old management server through PowerShell remoting, with its own SCOM module, and copies the result into `Source\`. `ExportTarget` fills `Target\`. To avoid typing the server and share every time, copy [`examples/Migration.settings.psd1`](examples/Migration.settings.psd1) next to the script.
 
-   ```
-   D:\SCOMMigration\
-       Invoke-ScomMigrationStep.ps1  MPMigration.ps1  MigrationManifest.csv
-       Source\          <- the whole source export folder
-       Target\AllMPs\   <- from the target export
-   ```
+   No remoting to the old server? Run `.\Export-ScomEnvironment.ps1 -Role Source -Manifest .\MigrationManifest.csv -OutputFolder C:\SCOMMigration\Source` there and copy the folder across. See [Exporting the source from the target server](docs/step-reference.md#exporting-the-source-from-the-target-server).
 
-   For other folder names or version labels, copy [`examples/Migration.settings.psd1`](examples/Migration.settings.psd1) next to the script.
-
-6. **Run the steps** from `D:\SCOMMigration`:
+4. **Run the steps** from the working folder:
 
    ```powershell
    .\Invoke-ScomMigrationStep.ps1 Check          # pre-flight; changes nothing
@@ -107,7 +97,7 @@ Every step is one word because the toolkit was built for a locked-down server wh
 `src/Migrate-ScomNotifications.ps1` moves notification channels, subscribers and subscriptions to a target that has none yet. It moves the `Notifications.Internal` MP as a whole, so criteria, scope, CC/BCC, schedules and SMTP settings come over intact. Every subscription arrives **disabled**, and you enable them yourself when you're ready.
 
 ```powershell
-.\Migrate-ScomNotifications.ps1 -Step Export      # on the source MS
+.\Migrate-ScomNotifications.ps1 -Step Export -SourceServer OLDSCOM01   # from the target MS, through remoting
 .\Migrate-ScomNotifications.ps1 -Step Prepare     # on the target MS; READY/BLOCKED, imports nothing
 .\Migrate-ScomNotifications.ps1 -Step Import      # asks you to type YES; everything arrives disabled
 .\Migrate-ScomNotifications.ps1 -Step Enable -Name 'Ops - Critical'

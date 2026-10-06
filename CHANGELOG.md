@@ -1,5 +1,25 @@
 # Changelog
 
+## 3.42.0
+
+### Run the whole migration from the target server
+The source export can now be started from the target management server. It still runs **on** the source server with the source's own `OperationsManager` module, inside a PowerShell remoting session, so the newer-module/older-management-group limit doesn't apply. The result lands straight in the working folder: no logging on to the old server, no copying folders by hand.
+
+- `Invoke-ScomMigrationStep.ps1` has two new steps:
+  - `ExportSource` (`-SourceServer`, optional `-SealedSearchPath` and `-SourceCredential`) fills `Source\`.
+  - `ExportTarget` fills `Target\`.
+  - Both keep any previous export as `<folder>.previous-<timestamp>`. `SourceServer` and `SealedSearchPath` can go in `Migration.settings.psd1`.
+- `Export-ScomEnvironment.ps1 -Role Source -SourceServer <server>`:
+  - The script's text is sent as a script block, so nothing is copied to the source and its execution policy doesn't apply.
+  - It runs in a temporary folder under the source's `%TEMP%`, which is copied back and removed.
+  - `-Credential` opens the session.
+- `-SealedSearchPath` is searched from the target server in a second pass. This avoids the remoting "double hop" to file shares. Originals dropped into a previous `Source\SealedOriginals\` are picked up again on re-export.
+- New `SealedOriginalsFound.csv` records which file was used for each sealed MP and where it was found.
+- `Migrate-ScomNotifications.ps1` 2.1.0: `-Step Export -SourceServer <server>` (with optional `-Credential`) does the same for notifications. A previous `Export` folder is kept, and the source's log goes to `Logs\FromSource-<time>\`.
+- The sealed-original search in `Export-ScomEnvironment.ps1` moved into a function, with unchanged results for a local export.
+- Tests: a PowerShell-remoting stand-in (`tests/mocks/remoting/`). The smoke test now also covers `ExportSource`: same output as a local export, the share pass, re-export, an unreachable server and a missing `-SourceServer`. The notifications test adds a remote scenario (39 assertions).
+- Docs: README quick start, step reference ("Exporting the source from the target server"), troubleshooting, notifications and the settings example.
+
 ## 3.41.0
 
 ### Added: notification migration (`src/Migrate-ScomNotifications.ps1`, script version 2.0.4)

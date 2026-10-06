@@ -21,7 +21,7 @@ Every subscription arrives **disabled**. You switch them on deliberately, one at
 ## Requirements
 
 - **The target has no notification config yet.** Prepare blocks if the target already has any subscription, subscriber or channel, because importing would replace them.
-- **Windows PowerShell 5.1 on each management server,** with that environment's own `OperationsManager` module. Export runs on the source and every other step on the target. A newer console can't connect to an older management group.
+- **Windows PowerShell 5.1 on each management server,** with that environment's own `OperationsManager` module. Export runs on the source (directly, or from the target with `-SourceServer`) and every other step on the target. A newer console can't connect to an older management group.
 - **SCOM Administrator on the target.** Read access is enough on the source.
 - **The MPs your subscriptions are scoped to already exist on the target.** Those are your custom groups and classes, so run the MP migration first if subscriptions point at custom groups.
 
@@ -40,6 +40,17 @@ The default work folder is `C:\SCOMMigration\Notifications`. Change it with `-Wo
 | 6 | Target MS | `.\Migrate-ScomNotifications.ps1 -Step Enable -AllEnabledOnSource` (type `YES`) | **Yes** |
 
 **Emergency stop:** `.\Migrate-ScomNotifications.ps1 -Step Disable -All` turns every subscription off. `-Step Verify` can be run at any time.
+
+### Everything from the target server
+
+With PowerShell remoting to the source server, you can skip step 1's log-on and the copy:
+
+```powershell
+.\Migrate-ScomNotifications.ps1 -Step Export -SourceServer OLDSCOM01
+.\Migrate-ScomNotifications.ps1 -Step Prepare
+```
+
+The export still runs on the source server with its own module. It writes to a temporary folder there, which is copied back into `<WorkFolder>\Export` on the target and then deleted. A previous `Export` folder is kept as `Export.previous-<time>`, and the source's log goes to `Logs\FromSource-<time>\`. Use `-Credential` if your own account isn't an administrator on the source server. The requirements are the same as for the MP export; see [Exporting the source from the target server](step-reference.md#exporting-the-source-from-the-target-server).
 
 The work folder ends up looking like this:
 
@@ -145,7 +156,7 @@ It comes over with that MP if the MP is migrated. Otherwise recreate it in the c
 - **Where the config is assumed to live.** Channels and subscribers are assumed to be in the same MP as the subscriptions. That's where the console puts them. If Verify reports channels or subscribers as MISSING after the import, stop and open an issue.
 - **Subscriptions stored in other MPs aren't moved by this script** (see above).
 - **What isn't migrated:** Run As accounts and their profile associations, and command-channel programs on disk.
-- **Offline testing:** `tests/Invoke-NotificationsTest.ps1` covers the steps and every blocker against a synthetic MP and stand-in cmdlets. Real-world validation so far is a single SCOM 2016 → 2025 migration.
+- **Offline testing:** `tests/Invoke-NotificationsTest.ps1` covers the steps, every blocker and the `-SourceServer` export against a synthetic MP, stand-in cmdlets and a stand-in for PowerShell remoting. Real-world validation so far is a single SCOM 2016 → 2025 migration.
 
 ## Before you share output
 

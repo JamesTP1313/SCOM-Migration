@@ -61,8 +61,15 @@
     .\Migrate-ScomNotifications.ps1 -Step Enable -Name 'Ops - Critical'
     .\Migrate-ScomNotifications.ps1 -Step Disable -All      # emergency stop
 
+.EXAMPLE
+    # Everything from the target management server: the export runs on the
+    # source through PowerShell remoting and lands in <WorkFolder>\Export here.
+    .\Migrate-ScomNotifications.ps1 -Step Export -SourceServer OLDSCOM01
+    .\Migrate-ScomNotifications.ps1 -Step Prepare
+
 .NOTES
-    Version 2.0.4. Used on a production SCOM 2016 -> 2025 migration.
+    Version 2.1.0. Used on a production SCOM 2016 -> 2025 migration.
+    2.1.0: -SourceServer runs the export through PowerShell remoting.
     See docs/notifications.md.
 #>
 
@@ -82,12 +89,32 @@ param(
 
     [switch]$All,
 
-    [switch]$Force
+    [switch]$Force,
+
+    # Export only: run the export ON this source management server through
+    # PowerShell remoting (with the source's own OperationsManager module) and
+    # copy the result into <WorkFolder>\Export here. Lets you run every step
+    # from the target management server.
+    [string]$SourceServer,
+
+    # Export with -SourceServer: credential for the remoting session.
+    [System.Management.Automation.PSCredential]$Credential,
+
+    # Internal: set on the copy that runs on the source during a -SourceServer export.
+    [Parameter(DontShow)][switch]$RemoteChild
 )
 
 #Requires -Version 5.1
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ThisScriptPath = $PSCommandPath
+
+# In the copy running on the source during a -SourceServer export, 'exit' would
+# end the remoting session silently, so stop with an error instead.
+function Stop-Script([string]$Message) {
+    if ($RemoteChild) { throw $Message }
+    exit 1
+}
 
 # Use the same work folder path on both servers.
 if (-not $WorkFolder) { $WorkFolder = 'C:\SCOMMigration\Notifications' }
@@ -97,7 +124,7 @@ $driveRoot  = [System.IO.Path]::GetPathRoot($WorkFolder)
 if (-not $driveRoot -or -not (Test-Path -LiteralPath $driveRoot)) {
     Write-Host "Work folder '$WorkFolder' is on drive '$driveRoot', which isn't available on this server." -ForegroundColor Red
     Write-Host "Pick a folder on a drive that exists, for example:  -WorkFolder C:\SCOMMigration\Notifications" -ForegroundColor Yellow
-    exit 1
+    Stop-Script "Work folder drive '$driveRoot' not available."
 }
 try {
     if (-not (Test-Path -LiteralPath $WorkFolder)) { New-Item -ItemType Directory -Path $WorkFolder -Force -ErrorAction Stop | Out-Null }
@@ -108,7 +135,7 @@ try {
 catch {
     Write-Host "Can't write to work folder '$WorkFolder': $($_.Exception.Message)" -ForegroundColor Red
     Write-Host 'Run PowerShell as Administrator, or pick another folder with -WorkFolder.' -ForegroundColor Yellow
-    exit 1
+    Stop-Script "Can't write to work folder '$WorkFolder'."
 }
 
 Write-Host "Work folder: $WorkFolder" -ForegroundColor DarkGray
@@ -132,12 +159,12 @@ function Initialize-Folder([string]$Path) {
 Initialize-Folder $WorkFolder
 Initialize-Folder $LogDir
 $RunStamp       = Get-Date -Format 'yyyyMMdd-HHmmss'
-$script:LogFile = Join-Path $LogDir "Notifications.$Step.$RunStamp.log"
+$NotifLogFile = Join-Path $LogDir "Notifications.$Step.$RunStamp.log"
 
 function Write-Log {
     param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR', 'OK')][string]$Level = 'INFO')
     $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8
+    Add-Content -LiteralPath $NotifLogFile -Value $line -Encoding UTF8
     switch ($Level) {
         'WARN'  { Write-Host $Message -ForegroundColor Yellow }
         'ERROR' { Write-Host $Message -ForegroundColor Red }
@@ -152,7 +179,7 @@ function Write-Banner([string]$Text) {
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host $Text -ForegroundColor Cyan
     Write-Host $line -ForegroundColor DarkCyan
-    Add-Content -LiteralPath $script:LogFile -Value "`r`n$line`r`n$Text`r`n$line" -Encoding UTF8
+    Add-Content -LiteralPath $NotifLogFile -Value "`r`n$line`r`n$Text`r`n$line" -Encoding UTF8
 }
 
 # Safe property read for SDK objects under StrictMode. Accepts a dotted path.
@@ -369,7 +396,66 @@ function Invoke-Export {
     Write-Log "Subscribers   : $($subscribers.Count)"
     Write-Log "Scope GUIDs   : $($resolved.Count) resolved ($(@($resolved | Where-Object Kind -eq 'Instance').Count) per-object)"
     Write-Log ''
-    Write-Log "Next: copy $ExportDir to the same path on the target management server, then run -Step Prepare there." 'OK'
+    if (-not $RemoteChild) { Write-Log "Next: copy $ExportDir to the same path on the target management server, then run -Step Prepare there." 'OK' }
+}
+
+###########################################################################
+# STEP: EXPORT through PowerShell remoting (run on the target)
+###########################################################################
+# The target's OperationsManager module can't connect to an older management
+# group, so the export runs ON the source management server, with its own
+# module, inside a remoting session. This script's text is sent as a script
+# block (no file copy; the source's execution policy doesn't apply), writes to
+# a temporary folder there, and the Export folder is copied back here. The
+# temporary folder is removed afterwards; nothing else on the source changes.
+
+function Invoke-RemoteExport {
+    Write-Banner "EXPORT (SOURCE) via PowerShell remoting from $SourceServer - read only"
+    $sessArgs = @{ ComputerName = $SourceServer; ErrorAction = 'Stop' }
+    if ($Credential) { $sessArgs['Credential'] = $Credential }
+    try { $session = New-PSSession @sessArgs }
+    catch { throw "Can't open a PowerShell remoting session to '$SourceServer': $($_.Exception.Message)  Check with: Test-WSMan $SourceServer  (your account must be an administrator on that server)." }
+
+    $remoteRoot = $null
+    try {
+        $remoteRoot = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            $p = Join-Path $env:TEMP ('ScomNotificationsExport-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $p -Force | Out-Null
+            $p
+        }
+        Write-Log "Working folder on $($SourceServer): $remoteRoot"
+
+        $code = [System.IO.File]::ReadAllText($ThisScriptPath)
+        Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            param($Code, $Root)
+            $childArgs = @{ Step = 'Export'; WorkFolder = [System.IO.Path]::Combine($Root, 'Work'); RemoteChild = $true }
+            $sb = [scriptblock]::Create($Code)
+            & $sb @childArgs
+        } -ArgumentList $code, $remoteRoot
+
+        if (Test-Path -LiteralPath $ExportDir) {
+            $bk = "$ExportDir.previous-$RunStamp"
+            Rename-Item -LiteralPath $ExportDir -NewName (Split-Path -Leaf $bk)
+            Write-Log "Previous Export folder kept as $bk" 'WARN'
+        }
+        Copy-Item -FromSession $session -Path ([System.IO.Path]::Combine($remoteRoot, 'Work', 'Export')) -Destination $WorkFolder -Recurse -Force -ErrorAction Stop
+        # The source's own log goes to Logs\FromSource-<time>\ (same file name pattern as ours).
+        try { Copy-Item -FromSession $session -Path ([System.IO.Path]::Combine($remoteRoot, 'Work', 'Logs')) -Destination (Join-Path $LogDir "FromSource-$RunStamp") -Recurse -Force -ErrorAction Stop } catch { }
+    }
+    finally {
+        if ($remoteRoot) {
+            try { Invoke-Command -Session $session -ScriptBlock { param($p) Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } -ArgumentList $remoteRoot } catch { }
+        }
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+    }
+
+    $summaryPath = Join-Path $ExportDir 'SourceSummary.json'
+    if (-not (Test-Path -LiteralPath $summaryPath)) { throw "The export on $SourceServer didn't complete (no SourceSummary.json came back). See the messages above." }
+    $sum = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    Write-Log ''
+    Write-Log "Copied back from $SourceServer ($($sum.ManagementGroup)): $($sum.Subscriptions) subscriptions, $($sum.Channels) channels, $($sum.Subscribers) subscribers." 'OK'
+    Write-Log "Export folder: $ExportDir"
+    Write-Log 'Next: run -Step Prepare on this server.' 'OK'
 }
 
 ###########################################################################
@@ -825,7 +911,7 @@ function Invoke-Disable {
 
 try {
     switch ($Step) {
-        'Export'  { Invoke-Export }
+        'Export'  { if ($SourceServer -and -not $RemoteChild) { Invoke-RemoteExport } else { Invoke-Export } }
         'Prepare' { Invoke-Prepare }
         'Import'  { Invoke-Import }
         'Verify'  { Invoke-Verify }
@@ -835,8 +921,9 @@ try {
 }
 catch {
     Write-Log "STOPPED: $(Get-ExceptionChain $_)" 'ERROR'
-    Add-Content -LiteralPath $script:LogFile -Value "Stack: $($_.ScriptStackTrace)" -Encoding UTF8
-    Write-Log "Log: $script:LogFile"
+    Add-Content -LiteralPath $NotifLogFile -Value "Stack: $($_.ScriptStackTrace)" -Encoding UTF8
+    Write-Log "Log: $NotifLogFile"
+    if ($RemoteChild) { throw }
     exit 1
 }
-Write-Log "Log: $script:LogFile"
+Write-Log "Log: $NotifLogFile"

@@ -4,6 +4,14 @@
     # Target management server the import/test steps connect to.
     ManagementServer = 'SCOMMS01.contoso.local'
 
+    # ExportSource: the OLD management server. The export runs there through
+    # PowerShell remoting and the result lands in SourceFolder here.
+    SourceServer     = 'OLDSCOM01.contoso.local'
+
+    # ExportSource: folders or shares with original .mp/.mpb files,
+    # searched from THIS server (optional).
+    SealedSearchPath = @('\\fileserver.contoso.local\SCOM\MPs')
+
     # Folder names (relative to the script) or absolute paths.
     SourceFolder     = 'Source'      # whole output folder of Export-ScomEnvironment.ps1 -Role Source
     TargetFolder     = 'Target'      # must contain AllMPs\

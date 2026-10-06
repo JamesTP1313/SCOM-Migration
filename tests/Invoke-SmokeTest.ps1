@@ -9,6 +9,10 @@
     2. Target export   : tests/fixtures/target copied in as Target\AllMPs
     3. Steps           : Check, FixReview, EnableOverrides, MapInstances, Compile, WhyBlocked, OverrideReport, DryRun, TestGroups
     4. Assertions      : READY/BLOCKED verdicts, stripping, group conversion, per-object override re-pointing
+    5. ExportSource    : the same source export run from the "target" through a
+                         PowerShell-remoting stand-in (tests/mocks/remoting),
+                         including the -SealedSearchPath pass, re-export and an
+                         unreachable server
 
     Exit code 0 = all assertions passed.
 
@@ -110,9 +114,58 @@ try {
 
     $map = @(Import-Csv (Join-Path $work 'InstanceMap.csv'))
     Assert (@($map | Where-Object { $_.NewGuid }).Count -eq 1) "InstanceMap: 1 object found in target, 1 not"
+
+    Write-Host "`n[5] ExportSource through PowerShell remoting (stand-in)" -ForegroundColor Cyan
+    $rw = Join-Path $work 'remote'
+    New-Item -ItemType Directory -Path $rw, (Join-Path $rw 'remote-temp'), (Join-Path $rw 'shares') -Force | Out-Null
+    Copy-Item (Join-Path $repo 'src\*.ps1') $rw
+    Copy-Item (Join-Path $fx 'MigrationManifest.csv') $rw
+    # An original for the in-scope sealed MP that the source itself doesn't have: on a "share" searched from the target.
+    Set-Content -LiteralPath (Join-Path $rw 'shares\Contoso.Custom.Library.mp') -Value 'fake sealed original'
+    $env:SCOMMIG_TEST_REMOTE_TEMP = Join-Path $rw 'remote-temp'
+    $loop = Join-Path $mocks 'remoting\Invoke-WithLoopback.ps1'
+    function Invoke-Remote([hashtable]$scriptArgs) {
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($scriptArgs | ConvertTo-Json -Compress)))
+        $env:PSModulePath = (Join-Path $mocks 'source') + $sep + $basePath
+        Push-Location $rw
+        try {
+            $out = & $exe -NoProfile -ExecutionPolicy Bypass -File $loop -Script (Join-Path $rw 'Invoke-ScomMigrationStep.ps1') -ArgsB64 $b64 2>&1 | Out-String -Width 250
+            $code = $LASTEXITCODE
+        }
+        finally { Pop-Location; $env:PSModulePath = $basePath }
+        Add-Content -LiteralPath (Join-Path $rw 'smoke-remote.txt') -Value $out
+        return [pscustomobject]@{ Code = $code; Output = $out }
+    }
+
+    $r = Invoke-Remote @{ Step = 'ExportSource'; SourceServer = 'OLDSCOM01'; SealedSearchPath = @((Join-Path $rw 'shares')) }
+    Assert ($r.Code -eq 0) "ExportSource exits cleanly"
+    $rs = Join-Path $rw 'Source'
+    foreach ($f in 'SourceInventory.csv', 'GroupConversion.csv', 'StaticGroupMembers.csv', 'OverrideInstances.csv', 'ManifestResolution.csv', 'Export-Source.log') {
+        Assert (Test-Path (Join-Path $rs $f)) "Copied back: $f"
+    }
+    $nLocal  = @(Get-ChildItem (Join-Path $work 'Source\AllMPs') -Filter *.xml).Count
+    $nRemote = @(Get-ChildItem (Join-Path $rs 'AllMPs') -Filter *.xml).Count
+    Assert ($nRemote -gt 0 -and $nRemote -eq $nLocal) "Same MPs exported as a local export ($nRemote)"
+    Assert ((Get-Content (Join-Path $rs 'GroupConversion.csv') -Raw) -eq (Get-Content (Join-Path $work 'Source\GroupConversion.original.csv') -Raw)) "GroupConversion.csv identical to a local export"
+    Assert (Test-Path (Join-Path $rs 'SealedOriginals\Contoso.Custom.Library.mp')) "Sealed original found on a share searched from the target"
+    Assert (@(Import-Csv (Join-Path $rs 'SealedOriginalsMissing.csv') | Where-Object MPID -eq 'Contoso.Custom.Library').Count -eq 0) "...and no longer listed as missing"
+    Assert (@(Import-Csv (Join-Path $rs 'SealedOriginalsFound.csv') | Where-Object MPID -eq 'Contoso.Custom.Library').Count -eq 1) "...and listed in SealedOriginalsFound.csv"
+    Assert (@(Get-ChildItem (Join-Path $rw 'remote-temp') -Force).Count -eq 0) "Temporary folder on the source removed"
+    $calls = Get-Content (Join-Path $rw 'remoting-calls.txt')
+    Assert ($calls -contains 'New-PSSession OLDSCOM01' -and $calls -contains 'Remove-PSSession') "Session opened to the source and closed"
+
+    $r = Invoke-Remote @{ Step = 'ExportSource'; SourceServer = 'OLDSCOM01' }
+    Assert ($r.Code -eq 0) "Re-export exits cleanly"
+    Assert (@(Get-ChildItem $rw -Directory -Filter 'Source.previous-*').Count -eq 1) "Previous export kept as Source.previous-*"
+    Assert (Test-Path (Join-Path $rs 'SealedOriginals\Contoso.Custom.Library.mp')) "Original from the previous SealedOriginals picked up again"
+
+    $r = Invoke-Remote @{ Step = 'ExportSource'; SourceServer = 'UNREACHABLE' }
+    Assert ($r.Code -ne 0 -and $r.Output -match 'Test-WSMan') "Unreachable source stops with a Test-WSMan hint"
+    $r = Invoke-Remote @{ Step = 'ExportSource' }
+    Assert ($r.Code -ne 0 -and $r.Output -match 'SourceServer') "ExportSource without -SourceServer says what to set"
 }
 finally {
-    $env:SCOMMIG_TEST_SOURCE = $null; $env:SCOMMIG_TEST_STATE = $null
+    $env:SCOMMIG_TEST_SOURCE = $null; $env:SCOMMIG_TEST_STATE = $null; $env:SCOMMIG_TEST_REMOTE_TEMP = $null
     if ($KeepWorkFolder -or $script:failures) { Write-Host "`nWork folder kept: $work" -ForegroundColor Yellow }
     else { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
