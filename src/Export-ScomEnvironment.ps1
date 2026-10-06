@@ -56,7 +56,16 @@ param(
     # digits only (APPSQL01, APPSQL02 -> ^(APPSQL[0-9]+)$). Wildcard =
     # NAME-STEM* (also catches APPSQLREPORT01). Exact = the listed names only.
     [ValidateSet('Tight', 'Wildcard', 'Exact')][string]$GroupPatternMode = 'Tight',
-    [switch]$SkipGroupConversion
+    [switch]$SkipGroupConversion,
+    # Run the SOURCE export from the target server. The export runs ON this
+    # source management server through PowerShell remoting, with the source's
+    # own OperationsManager module, and the results are copied back into
+    # -OutputFolder here. -Credential (if given) opens the remoting session.
+    # -SealedSearchPath is then searched from THIS server; the source's own
+    # install folders are searched on the source.
+    [string]$SourceServer,
+    # Internal: set on the copy that runs on the source during a -SourceServer export.
+    [Parameter(DontShow)][switch]$RemoteChild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,8 +74,232 @@ Set-StrictMode -Version Latest
 if (-not $OutputFolder) { $OutputFolder = Join-Path 'C:\SCOMMigration' "$Role-$(Get-Date -Format 'yyyyMMdd-HHmmss')" }
 New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
 $OutputFolder = (Resolve-Path -LiteralPath $OutputFolder).ProviderPath
-$log = Join-Path $OutputFolder "Export-$Role.log"
+$IsRemoteRun = [bool]($SourceServer -and -not $RemoteChild)
+$log = Join-Path $OutputFolder $(if ($IsRemoteRun) { "Export-$Role.remote-run.log" } else { "Export-$Role.log" })
 function Say([string]$m, [string]$c = 'Gray') { Write-Host $m -ForegroundColor $c; Add-Content -LiteralPath $log -Value "[$(Get-Date -Format s)] $m" -Encoding UTF8 }
+
+
+# Install/extract folders on the machine doing the export where vendor and
+# Microsoft .mp/.mpb files usually live.
+$DefaultSealedRoots = @(
+    "${env:ProgramFiles(x86)}\System Center Management Packs",
+    "$env:ProgramFiles\System Center Management Packs",
+    "$env:ProgramFiles\Microsoft System Center 2016\Operations Manager",
+    "$env:ProgramFiles\Microsoft System Center\Operations Manager"
+)
+
+# Finds the original .mp/.mpb files for the sealed MPs. In-scope MPs go to
+# SealedOriginals\, other sealed MPs (possible dependencies) to
+# SealedDependencies\ or SealedDependencies_Microsoft_optional\.
+# Writes SealedOriginalsFound.csv and SealedOriginalsMissing.csv.
+# -FillIn: a second pass (used by -SourceServer) that only looks for MPs not
+# already listed in SealedOriginalsFound.csv, and appends to it.
+function Find-SealedOriginals {
+    param($SealedInScope, $OtherSealed, [string[]]$Roots, [string]$OutputFolder, [switch]$FillIn)
+
+    $Roots = @($Roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+    Say "Searching for sealed originals under: $($Roots -join '; ')"
+
+    # Read ID/version from each candidate file with the SDK (the file name
+    # is often not the MP ID).
+    $sdkOk = [bool]('Microsoft.EnterpriseManagement.Configuration.ManagementPack' -as [type])
+    if (-not $sdkOk) { try {
+        $dll = Get-ChildItem -Path @("$env:ProgramFiles\Microsoft System Center*\Operations Manager", "$env:ProgramFiles\Microsoft System Center\Operations Manager") -Filter Microsoft.EnterpriseManagement.OperationsManager.dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($dll) {
+            Add-Type -Path (Join-Path $dll.DirectoryName 'Microsoft.EnterpriseManagement.Core.dll') -ErrorAction SilentlyContinue
+            Add-Type -Path $dll.FullName
+            $pk = Join-Path $dll.DirectoryName 'Microsoft.EnterpriseManagement.Packaging.dll'
+            if (Test-Path -LiteralPath $pk) { Add-Type -Path $pk -ErrorAction SilentlyContinue }
+            $sdkOk = $true
+        }
+    }
+    catch { Say "SDK not loadable ($($_.Exception.Message)); matching sealed files by file name only." 'Yellow' } }
+
+    $found = @{}   # MPID -> list of file info
+    $files = @(foreach ($r0 in $Roots) { Get-ChildItem -LiteralPath $r0 -Recurse -Include *.mp, *.mpb -ErrorAction SilentlyContinue })
+    Say "Candidate sealed files found: $($files.Count)"
+    foreach ($f in $files) {
+        $ids = @()
+        if ($sdkOk -and $f.Extension -ieq '.mp') {
+            try { $m = New-Object Microsoft.EnterpriseManagement.Configuration.ManagementPack($f.FullName); $ids += [PSCustomObject]@{ ID = $m.Name; Version = [string]$m.Version } } catch { }
+        }
+        elseif ($sdkOk -and $f.Extension -ieq '.mpb') {
+            try {
+                $reader = [Microsoft.EnterpriseManagement.Packaging.ManagementPackBundleFactory]::CreateBundleReader()
+                $store = New-Object Microsoft.EnterpriseManagement.Configuration.IO.ManagementPackFileStore
+                $store.AddDirectory($f.DirectoryName)
+                $b = $reader.Read($f.FullName, $store)
+                foreach ($bm in $b.ManagementPacks) { $ids += [PSCustomObject]@{ ID = $bm.Name; Version = [string]$bm.Version } }
+            }
+            catch { }
+        }
+        if ($ids.Count -eq 0) { $ids += [PSCustomObject]@{ ID = $f.BaseName; Version = '' } }
+        foreach ($i in $ids) {
+            if (-not $found.ContainsKey($i.ID)) { $found[$i.ID] = @() }
+            $found[$i.ID] += [PSCustomObject]@{ File = $f; Version = $i.Version }
+        }
+    }
+
+    # Best file for an MP: the exact installed version, else the highest
+    # version found. Returns $null if the best is LOWER than installed.
+    function Select-Original([string]$Id, [string]$InstalledVer) {
+        if (-not $found.ContainsKey($Id)) { return $null }
+        $exact = @($found[$Id] | Where-Object { $_.Version -eq $InstalledVer }) | Select-Object -First 1
+        if ($exact) { return $exact }
+        $best = @($found[$Id] | Sort-Object { try { [version]$_.Version } catch { [version]'0.0.0.0' } } -Descending) | Select-Object -First 1
+        if ($best.Version) {
+            try { if ([version]$best.Version -lt [version]$InstalledVer) { return $null } } catch { }
+        }
+        return $best
+    }
+
+    $origFolder = Join-Path $OutputFolder 'SealedOriginals'
+    New-Item -ItemType Directory -Path $origFolder -Force | Out-Null
+    $foundCsv = Join-Path $OutputFolder 'SealedOriginalsFound.csv'
+    $already = @{}
+    if ($FillIn -and (Test-Path -LiteralPath $foundCsv)) {
+        foreach ($r in @(Import-Csv -LiteralPath $foundCsv)) { $already[[string]$r.MPID] = $true }
+    }
+    $foundRows = New-Object System.Collections.Generic.List[object]
+    $missing = New-Object System.Collections.Generic.List[object]
+
+    foreach ($s in $SealedInScope) {
+        if ($already.ContainsKey([string]$s.MPID)) { continue }
+        $installedVer = [string]$s.Version
+        $pick = Select-Original $s.MPID $installedVer
+        if ($pick) {
+            Copy-Item -LiteralPath $pick.File.FullName -Destination $origFolder -Force
+            Say "  original found: $($s.MPID) v$($pick.Version) <- $($pick.File.FullName)" 'Green'
+            if ($pick.Version -and $pick.Version -ne $installedVer) { Say "    NOTE: installed in the source is v$installedVer, file is v$($pick.Version)" 'Yellow' }
+            $foundRows.Add([PSCustomObject]@{ MPID = $s.MPID; Version = $pick.Version; Folder = 'SealedOriginals'; File = $pick.File.Name; FoundAt = $pick.File.FullName })
+        }
+        else {
+            $missing.Add([PSCustomObject]@{ MPID = $s.MPID; DisplayName = $s.DisplayName; InstalledVersion = $installedVer; WorkbookName = $s.ManagementPack; Action = $s.Action })
+        }
+    }
+
+    # Sealed originals for everything ELSE installed in the source that we found
+    # a file for: potential dependencies of the in-scope MPs. Vendor libraries
+    # go to SealedDependencies (pass as -SourceRepositoryFolder). Microsoft
+    # packs go to a separate folder and are NOT used by default -- the
+    # target should run current Microsoft packs, not old ones.
+    $depFolder = Join-Path $OutputFolder 'SealedDependencies'
+    $msFolder  = Join-Path $OutputFolder 'SealedDependencies_Microsoft_optional'
+    New-Item -ItemType Directory -Path $depFolder, $msFolder -Force | Out-Null
+    $inScopeIds = @($SealedInScope | ForEach-Object { [string]$_.MPID })
+    $depCount = 0
+    foreach ($m in @($OtherSealed | Where-Object { $inScopeIds -notcontains [string]$_.Name -and -not $already.ContainsKey([string]$_.Name) })) {
+        $pick = Select-Original $m.Name ([string]$m.Version)
+        if (-not $pick) { continue }
+        $isMs = ($m.Name -like 'Microsoft.*' -or $m.Name -like 'System.*')
+        $dest = if ($isMs) { $msFolder } else { $depFolder }
+        Copy-Item -LiteralPath $pick.File.FullName -Destination $dest -Force
+        $foundRows.Add([PSCustomObject]@{ MPID = $m.Name; Version = $pick.Version; Folder = (Split-Path -Leaf $dest); File = $pick.File.Name; FoundAt = $pick.File.FullName })
+        $depCount++
+    }
+    Say "Copied $depCount other sealed original(s): vendor ones to SealedDependencies\, Microsoft ones to SealedDependencies_Microsoft_optional\"
+
+    if ($FillIn) { if ($foundRows.Count) { $foundRows.ToArray() | Export-Csv -LiteralPath $foundCsv -NoTypeInformation -Encoding UTF8 -Append } }
+    else { $foundRows.ToArray() | Export-Csv -LiteralPath $foundCsv -NoTypeInformation -Encoding UTF8 }
+    $missing.ToArray() | Export-Csv -LiteralPath (Join-Path $OutputFolder 'SealedOriginalsMissing.csv') -NoTypeInformation -Encoding UTF8
+    if ($missing.Count -gt 0) {
+        Say "$($missing.Count) in-scope SEALED MP(s) have no original .mp/.mpb -- see SealedOriginalsMissing.csv. Get them from the vendor / old install media, drop them in SealedOriginals\, and they will be picked up." 'Yellow'
+    }
+}
+
+function Write-NextSteps {
+    $allF = Join-Path $OutputFolder 'AllMPs'
+    Say ""
+    Say "For MPMigration.ps1 use:" 'Cyan'
+    Say "  -InputPath '$allF','$(Join-Path $OutputFolder 'SealedOriginals')'  -SourceInventory '$(Join-Path $OutputFolder 'SourceInventory.csv')'" 'Cyan'
+    if (Test-Path -LiteralPath (Join-Path $OutputFolder 'SealedDependencies')) {
+        Say "  -SourceRepositoryFolder '$(Join-Path $OutputFolder 'SealedDependencies')'" 'Cyan'
+    }
+}
+
+# ===================== SOURCE EXPORT THROUGH REMOTING =======================
+# The target's OperationsManager module can't connect to an older management
+# group, so the export itself runs ON the source management server (with its
+# own module) inside a PowerShell remoting session. The script's own text is
+# sent as a script block (no file copy, not subject to the source's execution
+# policy), it writes to a temporary folder there, and the result is copied
+# back here. Nothing on the source is changed apart from that temporary
+# folder, which is removed afterwards.
+if ($IsRemoteRun) {
+    if ($Role -ne 'Source') { throw "-SourceServer is only for -Role Source. Run -Role Target directly on the target management server." }
+    Say "Source export via PowerShell remoting: $SourceServer -> $OutputFolder" 'Cyan'
+
+    $sessArgs = @{ ComputerName = $SourceServer; ErrorAction = 'Stop' }
+    if ($Credential) { $sessArgs.Credential = $Credential }
+    try { $session = New-PSSession @sessArgs }
+    catch { throw "Can't open a PowerShell remoting session to '$SourceServer': $($_.Exception.Message)  Check with: Test-WSMan $SourceServer  (your account must be an administrator on that server)." }
+
+    $remoteRoot = $null
+    try {
+        $remoteRoot = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            $p = Join-Path $env:TEMP ('ScomMigrationExport-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $p -Force | Out-Null
+            $p
+        }
+        Say "Working folder on $($SourceServer): $remoteRoot"
+
+        $code = [System.IO.File]::ReadAllText($PSCommandPath)
+        $manifestText = $null
+        if ($Manifest) { $manifestText = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $Manifest).ProviderPath) }
+        $childArgs = @{ Role = 'Source'; GroupPatternMode = $GroupPatternMode; RemoteChild = $true }
+        if ($SkipGroupConversion) { $childArgs['SkipGroupConversion'] = $true }
+
+        Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            param($Code, $Root, $ManifestText, $ChildArgs)
+            $ChildArgs['OutputFolder'] = [System.IO.Path]::Combine($Root, 'Out')
+            if ($ManifestText) {
+                $mf = [System.IO.Path]::Combine($Root, 'MigrationManifest.csv')
+                [System.IO.File]::WriteAllText($mf, $ManifestText)
+                $ChildArgs['Manifest'] = $mf
+            }
+            $sb = [scriptblock]::Create($Code)
+            & $sb @ChildArgs
+        } -ArgumentList $code, $remoteRoot, $manifestText, $childArgs
+
+        Say ""
+        Say "Copying the export back from $SourceServer..." 'Cyan'
+        Copy-Item -FromSession $session -Path ([System.IO.Path]::Combine($remoteRoot, 'Out', '*')) -Destination $OutputFolder -Recurse -Force -ErrorAction Stop
+    }
+    finally {
+        if ($remoteRoot) {
+            try { Invoke-Command -Session $session -ScriptBlock { param($p) Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } -ArgumentList $remoteRoot } catch { }
+        }
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+    }
+
+    $invPath = Join-Path $OutputFolder 'SourceInventory.csv'
+    if (-not (Test-Path -LiteralPath $invPath)) { throw "The export on $SourceServer didn't produce SourceInventory.csv. See the messages above and $(Join-Path $OutputFolder 'Export-Source.log')." }
+    $nMps = @(Get-ChildItem -LiteralPath (Join-Path $OutputFolder 'AllMPs') -Filter *.xml -ErrorAction SilentlyContinue).Count
+    Say "Copied back: $nMps MP export(s) plus inventory and conversion files." 'Green'
+
+    # -SealedSearchPath (typically \\fileserver\MPs) is searched from HERE:
+    # a remoting session can't pass your credentials on to a third server.
+    $mrPath = Join-Path $OutputFolder 'ManifestResolution.csv'
+    if ($Manifest -and $SealedSearchPath -and (Test-Path -LiteralPath $mrPath)) {
+        $inScope = @(Import-Csv -LiteralPath $mrPath | Where-Object { $_.Status -eq 'Matched' -and [string]$_.Sealed -eq 'True' })
+        if ($inScope.Count -gt 0) {
+            $other = @(Import-Csv -LiteralPath $invPath | Where-Object { [string]$_.Sealed -eq 'True' } | ForEach-Object { [PSCustomObject]@{ Name = $_.Name; Version = $_.Version } })
+            Say ""
+            Say "Searching -SealedSearchPath from $([Environment]::MachineName) for originals not found on $SourceServer..." 'Cyan'
+            Find-SealedOriginals -SealedInScope $inScope -OtherSealed $other -Roots $SealedSearchPath -OutputFolder $OutputFolder -FillIn
+        }
+    }
+    $missPath = Join-Path $OutputFolder 'SealedOriginalsMissing.csv'
+    if (Test-Path -LiteralPath $missPath) {
+        $stillMissing = @(Import-Csv -LiteralPath $missPath)
+        Say ""
+        if ($stillMissing.Count -gt 0) { Say "Result: $($stillMissing.Count) in-scope sealed MP(s) still have no original .mp/.mpb (SealedOriginalsMissing.csv). Add a share with -SealedSearchPath, or drop the files in SealedOriginals\." 'Yellow' }
+        else { Say "Result: every in-scope sealed MP has its original .mp/.mpb." 'Green' }
+    }
+
+    Write-NextSteps
+    return
+}
 
 Import-Module OperationsManager
 if ($Credential) { New-SCOMManagementGroupConnection -ComputerName $ManagementServer -Credential $Credential | Out-Null }
@@ -354,115 +587,15 @@ if ($Manifest) {
     # Look for the original sealed files of in-scope sealed MPs.
     if ($sealedInScope.Count -gt 0) {
         $roots = @()
-        if ($SealedSearchPath) { $roots += $SealedSearchPath }
-        $roots += @(
-            "${env:ProgramFiles(x86)}\System Center Management Packs",
-            "$env:ProgramFiles\System Center Management Packs",
-            "$env:ProgramFiles\Microsoft System Center 2016\Operations Manager",
-            "$env:ProgramFiles\Microsoft System Center\Operations Manager"
-        )
-        $roots = @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
-        Say "Searching for sealed originals under: $($roots -join '; ')"
-
-        # Read ID/version from each candidate file with the SDK (the file name
-        # is often not the MP ID).
-        $sdkOk = [bool]('Microsoft.EnterpriseManagement.Configuration.ManagementPack' -as [type])
-        if (-not $sdkOk) { try {
-            $dll = Get-ChildItem -Path @("$env:ProgramFiles\Microsoft System Center*\Operations Manager", "$env:ProgramFiles\Microsoft System Center\Operations Manager") -Filter Microsoft.EnterpriseManagement.OperationsManager.dll -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($dll) {
-                Add-Type -Path (Join-Path $dll.DirectoryName 'Microsoft.EnterpriseManagement.Core.dll') -ErrorAction SilentlyContinue
-                Add-Type -Path $dll.FullName
-                $pk = Join-Path $dll.DirectoryName 'Microsoft.EnterpriseManagement.Packaging.dll'
-                if (Test-Path -LiteralPath $pk) { Add-Type -Path $pk -ErrorAction SilentlyContinue }
-                $sdkOk = $true
-            }
-        }
-        catch { Say "SDK not loadable ($($_.Exception.Message)); matching sealed files by file name only." 'Yellow' } }
-
-        $found = @{}   # MPID -> list of file info
-        $files = @(foreach ($r0 in $roots) { Get-ChildItem -LiteralPath $r0 -Recurse -Include *.mp, *.mpb -ErrorAction SilentlyContinue })
-        Say "Candidate sealed files found: $($files.Count)"
-        foreach ($f in $files) {
-            $ids = @()
-            if ($sdkOk -and $f.Extension -ieq '.mp') {
-                try { $m = New-Object Microsoft.EnterpriseManagement.Configuration.ManagementPack($f.FullName); $ids += [PSCustomObject]@{ ID = $m.Name; Version = [string]$m.Version } } catch { }
-            }
-            elseif ($sdkOk -and $f.Extension -ieq '.mpb') {
-                try {
-                    $reader = [Microsoft.EnterpriseManagement.Packaging.ManagementPackBundleFactory]::CreateBundleReader()
-                    $store = New-Object Microsoft.EnterpriseManagement.Configuration.IO.ManagementPackFileStore
-                    $store.AddDirectory($f.DirectoryName)
-                    $b = $reader.Read($f.FullName, $store)
-                    foreach ($bm in $b.ManagementPacks) { $ids += [PSCustomObject]@{ ID = $bm.Name; Version = [string]$bm.Version } }
-                }
-                catch { }
-            }
-            if ($ids.Count -eq 0) { $ids += [PSCustomObject]@{ ID = $f.BaseName; Version = '' } }
-            foreach ($i in $ids) {
-                if (-not $found.ContainsKey($i.ID)) { $found[$i.ID] = @() }
-                $found[$i.ID] += [PSCustomObject]@{ File = $f; Version = $i.Version }
-            }
-        }
-
-        # Every sealed MP installed in 2016 is a candidate dependency too, so
-        # copy originals for ALL sealed in-scope MPs AND anything else found.
-        $origFolder = Join-Path $OutputFolder 'SealedOriginals'
-        New-Item -ItemType Directory -Path $origFolder -Force | Out-Null
-        $missing = New-Object System.Collections.Generic.List[object]
-        # Best file for an MP: the exact installed version, else the highest
-        # version found. Returns $null if the best is LOWER than installed.
-        function Select-Original([string]$Id, [string]$InstalledVer) {
-            if (-not $found.ContainsKey($Id)) { return $null }
-            $exact = @($found[$Id] | Where-Object { $_.Version -eq $InstalledVer }) | Select-Object -First 1
-            if ($exact) { return $exact }
-            $best = @($found[$Id] | Sort-Object { try { [version]$_.Version } catch { [version]'0.0.0.0' } } -Descending) | Select-Object -First 1
-            if ($best.Version) {
-                try { if ([version]$best.Version -lt [version]$InstalledVer) { return $null } } catch { }
-            }
-            return $best
-        }
-
-        foreach ($s in $sealedInScope) {
-            $installedVer = [string]$s.Version
-            $pick = Select-Original $s.MPID $installedVer
-            if ($pick) {
-                Copy-Item -LiteralPath $pick.File.FullName -Destination $origFolder -Force
-                Say "  original found: $($s.MPID) v$($pick.Version) <- $($pick.File.FullName)" 'Green'
-                if ($pick.Version -and $pick.Version -ne $installedVer) { Say "    NOTE: installed in the source is v$installedVer, file is v$($pick.Version)" 'Yellow' }
-            }
-            else {
-                $missing.Add([PSCustomObject]@{ MPID = $s.MPID; DisplayName = $s.DisplayName; InstalledVersion = $installedVer; WorkbookName = $s.ManagementPack; Action = $s.Action })
-            }
-        }
-
-        # Sealed originals for everything ELSE installed in 2016 that we found a
-        # file for: potential dependencies of the in-scope MPs. Vendor libraries
-        # go to SealedDependencies (pass as -SourceRepositoryFolder). Microsoft
-        # packs go to a separate folder and are NOT used by default -- the
-        # target should run current Microsoft packs, not 2016-era ones.
-        $depFolder = Join-Path $OutputFolder 'SealedDependencies'
-        $msFolder  = Join-Path $OutputFolder 'SealedDependencies_Microsoft_optional'
-        New-Item -ItemType Directory -Path $depFolder, $msFolder -Force | Out-Null
-        $inScopeIds = @($sealedInScope | ForEach-Object { $_.MPID })
-        $depCount = 0
-        foreach ($m in @($mps | Where-Object { $_.Sealed -and $inScopeIds -notcontains $_.Name })) {
-            $pick = Select-Original $m.Name ([string]$m.Version)
-            if (-not $pick) { continue }
-            $dest = if ($m.Name -like 'Microsoft.*' -or $m.Name -like 'System.*') { $msFolder } else { $depFolder }
-            Copy-Item -LiteralPath $pick.File.FullName -Destination $dest -Force
-            $depCount++
-        }
-        Say "Copied $depCount other sealed original(s): vendor ones to SealedDependencies\, Microsoft ones to SealedDependencies_Microsoft_optional\"
-        $missing | Export-Csv -LiteralPath (Join-Path $OutputFolder 'SealedOriginalsMissing.csv') -NoTypeInformation -Encoding UTF8
-        if ($missing.Count -gt 0) {
-            Say "$($missing.Count) in-scope SEALED MP(s) have no original .mp/.mpb on this server -- see SealedOriginalsMissing.csv. Get them from the vendor / old install media, drop them in SealedOriginals\, and they will be picked up." 'Yellow'
-        }
+        if ($SealedSearchPath -and -not $RemoteChild) { $roots += $SealedSearchPath }
+        $roots += $DefaultSealedRoots
+        $otherSealed = @($mps | Where-Object { $_.Sealed } | ForEach-Object { [PSCustomObject]@{ Name = [string]$_.Name; Version = [string]$_.Version } })
+        Find-SealedOriginals -SealedInScope $sealedInScope -OtherSealed $otherSealed -Roots $roots -OutputFolder $OutputFolder
     }
 }
 
-Say ""
-Say "Copy this whole folder to the target management server. For MPMigration.ps1 use:" 'Cyan'
-Say "  -InputPath '$allFolder','$(Join-Path $OutputFolder 'SealedOriginals')'  -SourceInventory '$(Join-Path $OutputFolder $invName)'" 'Cyan'
-if (Test-Path -LiteralPath (Join-Path $OutputFolder 'SealedDependencies')) {
-    Say "  -SourceRepositoryFolder '$(Join-Path $OutputFolder 'SealedDependencies')'" 'Cyan'
+if (-not $RemoteChild) {
+    Say ""
+    Say "Copy this whole folder to the target management server."
+    Write-NextSteps
 }

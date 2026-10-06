@@ -30,7 +30,15 @@ The source export came from a toolkit version that used the old column names (`E
 ## Export
 
 **`Get-SCOMManagementPack` fails, or connects to the wrong management group**
-Run the export **on** each environment's own management server with its own console and module. A newer `OperationsManager` module can't connect to an older management group.
+Run the export **on** each environment's own management server with its own console and module, or use `ExportSource -SourceServer <old MS>`, which does that for you through PowerShell remoting. A newer `OperationsManager` module can't connect to an older management group.
+
+**`ExportSource`: "Can't open a PowerShell remoting session"**
+Run `Test-WSMan <source server>` on the target server.
+- **It fails:** WinRM is off or blocked. On the source server, `Enable-PSRemoting -Force` turns it on (or ask whoever owns the firewall and group policy), or export on the source server and copy the folder as before.
+- **It works but the session is refused:** your account isn't an administrator on the source server. Use `-SourceCredential (Get-Credential)`.
+
+**`ExportSource`: sealed originals on a share aren't found**
+Shares are searched from the target server, with your account there, so pass them with `-SealedSearchPath` (or `SealedSearchPath` in `Migration.settings.psd1`). The source session can't reach a third server with your credentials.
 
 **Lots of rows in `SealedOriginalsMissing.csv`**
 These are the original `.mp`/`.mpb` files for in-scope sealed MPs. Look on the old install media, the vendor's download page, the `System Center Management Packs` folder on old management servers, or your team's MP share. Drop them in `Source\SealedOriginals\` (sub-folders are fine) and run `Compile` again. Until then, those MPs and everything built on them are BLOCKED.

@@ -14,11 +14,20 @@
                 GroupConversion.csv, StaticGroupMembers.csv, OverrideInstances.csv, ...
             Target\AllMPs\   <- from Export-ScomEnvironment.ps1 -Role Target
 
+    ExportSource and ExportTarget fill Source\ and Target\ for you, so the
+    whole migration can be run from the target management server. ExportSource
+    runs Export-ScomEnvironment.ps1 ON the source management server through
+    PowerShell remoting (with the source's own OperationsManager module) and
+    copies the result back. An existing Source\ or Target\ folder is kept as
+    <folder>.previous-<timestamp>.
+
     Folder names and version labels can be changed with parameters or with an
     optional Migration.settings.psd1 next to this script, e.g.
         @{ SourceFolder = 'Source2012R2'; TargetFolder = 'Target2022'; SourceVersion = '2012 R2'; TargetVersion = '2022' }
 
     Steps (typical order):
+        .\Invoke-ScomMigrationStep.ps1 ExportSource    # export the SOURCE from here through PowerShell remoting (needs -SourceServer)
+        .\Invoke-ScomMigrationStep.ps1 ExportTarget    # export this (TARGET) management group
         .\Invoke-ScomMigrationStep.ps1 Check           # pre-flight, changes nothing
         .\Invoke-ScomMigrationStep.ps1 FixReview       # REVIEW groups -> exact member names; watcher groups -> display name
         .\Invoke-ScomMigrationStep.ps1 EnableOverrides # optional: Migrate = Y on every OVERRIDES row (backup kept)
@@ -36,12 +45,18 @@
     See docs/step-reference.md for details.
 #>
 param(
-    [Parameter(Mandatory, Position = 0)][ValidateSet('Check', 'FixReview', 'EnableOverrides', 'MapInstances', 'OverrideReport', 'Compile', 'DryRun', 'Import', 'Reimport', 'TestGroups', 'WhyBlocked', 'Rollback', 'Collect')][string]$Step,
+    [Parameter(Mandatory, Position = 0)][ValidateSet('ExportSource', 'ExportTarget', 'Check', 'FixReview', 'EnableOverrides', 'MapInstances', 'OverrideReport', 'Compile', 'DryRun', 'Import', 'Reimport', 'TestGroups', 'WhyBlocked', 'Rollback', 'Collect')][string]$Step,
     [string]$ManagementServer = $env:COMPUTERNAME,
     [string]$SourceFolder = 'Source',
     [string]$TargetFolder = 'Target',
     [string]$SourceVersion = '2016',
-    [string]$TargetVersion = '2025'
+    [string]$TargetVersion = '2025',
+    # ExportSource: the source (old) management server to export through PowerShell remoting.
+    [string]$SourceServer,
+    # ExportSource: folders or shares with original .mp/.mpb files, searched from THIS server.
+    [string[]]$SealedSearchPath,
+    # ExportSource: credential for the remoting session (default: your own account).
+    [System.Management.Automation.PSCredential]$SourceCredential
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,7 +65,7 @@ $root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $settingsFile = Join-Path $root 'Migration.settings.psd1'
 if (Test-Path -LiteralPath $settingsFile) {
     $cfg = Import-PowerShellDataFile -LiteralPath $settingsFile
-    foreach ($k in 'ManagementServer', 'SourceFolder', 'TargetFolder', 'SourceVersion', 'TargetVersion') {
+    foreach ($k in 'ManagementServer', 'SourceFolder', 'TargetFolder', 'SourceVersion', 'TargetVersion', 'SourceServer', 'SealedSearchPath') {
         if ($cfg.ContainsKey($k) -and $cfg[$k] -and -not $PSBoundParameters.ContainsKey($k)) { Set-Variable -Name $k -Value $cfg[$k] }
     }
 }
@@ -81,7 +96,42 @@ function Need([string]$p, [string]$what) {
     if (-not (Test-Path -LiteralPath $p)) { throw "Missing $what : $p" }
 }
 
+# Moves an existing export folder aside before a fresh export; returns the new
+# path, or $null if there was nothing to keep.
+function Backup-Folder([string]$p) {
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    if (@(Get-ChildItem -LiteralPath $p -Force).Count -eq 0) { Remove-Item -LiteralPath $p -Force; return $null }
+    $dest = "$p.previous-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    Rename-Item -LiteralPath $p -NewName (Split-Path -Leaf $dest)
+    Write-Host "Previous export kept as $dest" -ForegroundColor Yellow
+    return $dest
+}
+
 switch ($Step) {
+
+    'ExportSource' {
+        Need (Join-Path $root 'Export-ScomEnvironment.ps1') 'Export-ScomEnvironment.ps1'
+        Need (Join-Path $root 'MigrationManifest.csv') 'MigrationManifest.csv'
+        if (-not $SourceServer) { throw "Name the source management server: -SourceServer <name>, or SourceServer = '<name>' in Migration.settings.psd1." }
+        $search = @($SealedSearchPath | Where-Object { $_ })
+        $prev = Backup-Folder $src
+        # Originals dropped into the previous Source\SealedOriginals are picked up again.
+        if ($prev -and (Test-Path -LiteralPath (Join-Path $prev 'SealedOriginals'))) { $search += (Join-Path $prev 'SealedOriginals') }
+        $a = @{ Role = 'Source'; SourceServer = $SourceServer; Manifest = (Join-Path $root 'MigrationManifest.csv'); OutputFolder = $src }
+        if ($search.Count -gt 0) { $a.SealedSearchPath = $search }
+        if ($SourceCredential) { $a.Credential = $SourceCredential }
+        & (Join-Path $root 'Export-ScomEnvironment.ps1') @a
+        if ($prev) {
+            Write-Host ""
+            Write-Host "Re-exported. Edits you made to the previous $srcName\GroupConversion.csv are in $prev -- run FixReview again or copy your edits across, and re-run MapInstances." -ForegroundColor Yellow
+        }
+    }
+
+    'ExportTarget' {
+        Need (Join-Path $root 'Export-ScomEnvironment.ps1') 'Export-ScomEnvironment.ps1'
+        $null = Backup-Folder $tgtBase
+        & (Join-Path $root 'Export-ScomEnvironment.ps1') -Role Target -ManagementServer $ManagementServer -OutputFolder $tgtBase
+    }
 
     'Check' {
         Need (Join-Path $root 'MPMigration.ps1') 'MPMigration.ps1'

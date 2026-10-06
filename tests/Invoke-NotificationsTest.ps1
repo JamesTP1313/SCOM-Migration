@@ -26,7 +26,7 @@ $workAll = Join-Path ([System.IO.Path]::GetTempPath()) 'ScomNotificationsTest'
 ###########################################################################
 if (-not $Scenario) {
     $exe = (Get-Process -Id $PID).Path
-    $scenarios = 'happy', 'othermp', 'missed', 'blockedref', 'tamper', 'noconfirm', 'damaged'
+    $scenarios = 'happy', 'remote', 'othermp', 'missed', 'blockedref', 'tamper', 'noconfirm', 'damaged'
     $failures = New-Object System.Collections.ArrayList
     $passes = 0
     if (Test-Path $workAll) { Remove-Item -Recurse -Force $workAll }
@@ -70,6 +70,15 @@ if (-not $Scenario) {
                 Assert $s 'Enable -AllEnabledOnSource enabled only the clean one' (((Get-Names $result.EnabledAfterEnable) -join ',') -eq 'Ops - Critical')
                 Assert $s 'Disable -All left nothing enabled' ((Get-Names $result.EnabledAfterDisable).Count -eq 0)
                 Assert $s 'second Prepare blocks (target not empty)' ($result.SecondPrepareStatus -eq 'BLOCKED')
+            }
+            'remote' {
+                Assert $s 'export through remoting came back' (Test-Path (Join-Path $work 'Export/SourceSummary.json'))
+                Assert $s 'Prepare is READY on the remote export' ($result.FirstPrepareStatus -eq 'READY')
+                Assert $s 'import happened' ($result.Imported)
+                Assert $s 'temporary folder on the source removed' ($result.RemoteTempLeft -eq 0)
+                Assert $s 'session opened to the source and closed' ($result.SessionOpened -and $result.SessionClosed)
+                Assert $s 'source log copied into Logs' ($result.SourceLogCopied)
+                Assert $s 'unreachable source stops with a Test-WSMan hint' ($result.UnreachableStopped)
             }
             'othermp' {
                 Assert $s 'subscription stored in another MP is only a warning' ($prep.Status -eq 'READY')
@@ -245,7 +254,23 @@ $result = [ordered]@{}
 if ($Scenario -eq 'othermp') { $MockState.Source.Subs += (New-Sub 'SubscriptionZZ' 'Stored Elsewhere' $true 'Ops Team') }
 if ($Scenario -eq 'missed')  { $MockState.Source.Subs += (New-Sub 'Smtp1' 'Referenced But Not A Rule' $true 'Ops Team') }
 
-Run 'Source' @{ Step = 'Export' }
+if ($Scenario -eq 'remote') {
+    . (Join-Path $here 'mocks/remoting/RemotingLoopback.ps1')
+    $env:SCOMMIG_TEST_REMOTE_TEMP = Join-Path $work 'remote-temp'
+    New-Item -ItemType Directory -Path $env:SCOMMIG_TEST_REMOTE_TEMP -Force | Out-Null
+    # From the "target": the export itself runs on the source through the stand-in session.
+    Run 'Source' @{ Step = 'Export'; SourceServer = 'OLDSCOM01' }
+    $result.RemoteTempLeft  = @(Get-ChildItem $env:SCOMMIG_TEST_REMOTE_TEMP -Force).Count
+    $result.SessionOpened   = [bool]($RemotingCalls -contains 'New-PSSession OLDSCOM01')
+    $result.SessionClosed   = [bool]($RemotingCalls -contains 'Remove-PSSession')
+    $result.SourceLogCopied = [bool](@(Get-ChildItem (Join-Path $work 'Logs') -Directory -Filter 'FromSource-*' | Get-ChildItem -Filter 'Notifications.Export.*.log').Count -eq 1)
+    $before = Test-Path (Join-Path $work 'Export')
+    Run 'Source' @{ Step = 'Export'; SourceServer = 'UNREACHABLE' }
+    $result.UnreachableStopped = [bool]($before -and (Get-ChildItem (Join-Path $work 'Logs') -Filter '*.log' | Get-Content | Select-String 'Test-WSMan'))
+}
+else {
+    Run 'Source' @{ Step = 'Export' }
+}
 
 if ($Scenario -eq 'damaged') {
     # Simulate a hand-edit that emptied most of the inventory

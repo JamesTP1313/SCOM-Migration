@@ -3,6 +3,7 @@
 - [The working folder](#the-working-folder)
 - [The manifest](#the-manifest)
 - [Export-ScomEnvironment.ps1](#export-scomenvironmentps1)
+- [Exporting the source from the target server](#exporting-the-source-from-the-target-server)
 - [Invoke-ScomMigrationStep.ps1 steps](#invoke-scommigrationstepps1)
 - [Import-Batch.\<ver\>.ps1](#import-batchverps1)
 - [MPMigration.ps1 run directly](#mpmigrationps1-run-directly)
@@ -33,6 +34,9 @@
 | `-TargetFolder` | `Target` | Folder that contains `AllMPs\` |
 | `-SourceVersion` | `2016` | Label used in messages and reports |
 | `-TargetVersion` | `2025` | Label; also names `Import-Batch.<TargetVersion>.ps1` |
+| `-SourceServer` | — | `ExportSource`: the source management server to export through PowerShell remoting |
+| `-SealedSearchPath` | — | `ExportSource`: folders or shares with original `.mp`/`.mpb` files, searched from this server |
+| `-SourceCredential` | your account | `ExportSource`: credential for the remoting session (command line only) |
 
 You can put the same keys in `Migration.settings.psd1` next to the script so nobody has to type them (see [`examples/`](../examples/Migration.settings.psd1)). A parameter given on the command line wins over the settings file.
 
@@ -54,14 +58,15 @@ Check `ManifestResolution.csv` (source export) or `ManifestMatch.csv` (compile) 
 
 ## Export-ScomEnvironment.ps1
 
-This script is read-only against SCOM. Run it on each management server with that environment's own `OperationsManager` module.
+This script is read-only against SCOM. It runs with each environment's own `OperationsManager` module: either directly on that environment's management server, or, for the source, from the target server with `-SourceServer` (see [below](#exporting-the-source-from-the-target-server)).
 
 | Parameter | Meaning |
 |---|---|
 | `-Role Source\|Target` | Required |
 | `-OutputFolder` | Default `C:\SCOMMigration\<Role>-<timestamp>` |
 | `-ManagementServer` | Default `localhost` |
-| `-Credential` | Optional |
+| `-Credential` | Optional. With `-SourceServer`, the credential for the remoting session. |
+| `-SourceServer` | Source role. Run the export on this server through PowerShell remoting and copy the result into `-OutputFolder` here. |
 | `-Manifest` | Source role. Limits sealed-original searching and group/override analysis to in-scope MPs, and writes `ManifestResolution.csv`. |
 | `-SealedSearchPath` | Source role. Extra folders and shares to search for original `.mp`/`.mpb` files. |
 | `-GroupPatternMode` | Source role. `Tight` (default), `Wildcard` or `Exact`. See [How it works](how-it-works.md#static-groups--dynamic-groups). |
@@ -75,23 +80,61 @@ What each role writes:
   - `ManifestResolution.csv`
   - `SealedOriginals\`
   - `SealedOriginalsMissing.csv`
+  - `SealedOriginalsFound.csv` (which file was used for each sealed MP, and where it was found)
   - `SealedDependencies\` (vendor sealed MPs the in-scope MPs use)
   - `SealedDependencies_Microsoft_optional\`
   - `GroupConversion.csv`
   - `StaticGroupMembers.csv`
   - `OverrideInstances.csv`
-  - `Export-Source.log`
+  - `Export-Source.log` (with `-SourceServer`, also `Export-Source.remote-run.log` from the target side)
 - **Target:**
   - `AllMPs\`
   - `TargetInventory.csv`
   - `Export-Target.log`
 
+## Exporting the source from the target server
+
+A newer `OperationsManager` module can't connect to an older management group. With `-SourceServer` (or the `ExportSource` step) the export still runs **on** the source management server with the source's own module, but you start it from the target server:
+
+```powershell
+.\Invoke-ScomMigrationStep.ps1 ExportSource -SourceServer OLDSCOM01 -SealedSearchPath '\\fileserver\MPs'
+.\Invoke-ScomMigrationStep.ps1 ExportTarget
+```
+
+What happens:
+
+1. A PowerShell remoting session is opened to the source server.
+2. The export script's text is sent over the session and run there as a script block. Nothing is copied to the source except the manifest, and the source's execution policy doesn't apply.
+3. It writes to a temporary folder under the source's `%TEMP%`, which is copied back to `Source\` here and then deleted.
+4. The source's own install folders are searched there for sealed originals. `-SealedSearchPath` is searched **from the target server** afterwards. A remoting session can't pass your credentials on to a third server (the "double hop"), so shares are read from here.
+5. An existing `Source\` is kept as `Source.previous-<timestamp>`, and originals you dropped into its `SealedOriginals\` are found again.
+
+Requirements:
+
+- PowerShell remoting (WinRM, TCP 5985) from the target to the source server. Check with `Test-WSMan <server>`.
+- Your account (or `-SourceCredential`) is an administrator on the source server and can read the source management group.
+- Space under `%TEMP%` on the source server for one export of every MP.
+
+Quick test from the target server:
+
+```powershell
+Invoke-Command -ComputerName OLDSCOM01 {
+    Import-Module OperationsManager
+    New-SCOMManagementGroupConnection -ComputerName localhost
+    (Get-SCOMManagementGroupConnection).ManagementGroupName
+}
+```
+
+If remoting isn't allowed, run `Export-ScomEnvironment.ps1 -Role Source` on the source server and copy the folder across, as before.
+
 ## Invoke-ScomMigrationStep.ps1
 
-Each step is one word, and the steps are listed in their usual order. Steps that touch SCOM connect to `-ManagementServer`, which is the **target**. Nothing ever connects to the source from here.
+Each step is one word, and the steps are listed in their usual order. Steps that touch SCOM connect to `-ManagementServer`, which is the **target**. The only exception is `ExportSource`, which reads the source through PowerShell remoting.
 
 | Step | Touches SCOM | What it does | Writes |
 |---|---|---|---|
+| `ExportSource` | read (source) | Runs `Export-ScomEnvironment.ps1 -Role Source` on `-SourceServer` through PowerShell remoting with `MigrationManifest.csv`, and copies the result here. Keeps any previous export as `Source.previous-<timestamp>`. | `Source\` |
+| `ExportTarget` | read | Runs `Export-ScomEnvironment.ps1 -Role Target` against this management group. Keeps any previous export as `Target.previous-<timestamp>`. | `Target\` |
 | `Check` | no | Pre-flight. Counts exported MPs, sealed originals and dependencies. Lists manifest rows with no match, in-scope sealed MPs with no original file, and REVIEW group rules. It flags risky REVIEW groups (names containing Disable, NonProd, Test, Maint…), where over-matching would actually hurt. | `Check-Report.txt` |
 | `FixReview` | no | Rewrites REVIEW group rules to exact current member names, and rules whose members are Health Service Watchers to a display-name match. It keeps the original as `GroupConversion.original.csv`. Safe to run again: if a fresh export replaces `GroupConversion.csv`, the new file is used. | `Source\GroupConversion.csv` |
 | `EnableOverrides` | no | Optional. Sets `Migrate = Y` on every `Action = OVERRIDES` row. | `MigrationManifest.csv` (backup: `MigrationManifest.before-overrides.csv`) |
@@ -109,8 +152,10 @@ Each step is one word, and the steps are listed in their usual order. Steps that
 A typical first run is:
 
 ```
-Check → FixReview → (EnableOverrides) → (MapInstances) → Compile → WhyBlocked → DryRun → Import → TestGroups
+ExportSource → ExportTarget → Check → FixReview → (EnableOverrides) → (MapInstances) → Compile → WhyBlocked → DryRun → Import → TestGroups
 ```
+
+A re-export replaces `Source\GroupConversion.csv`. Your edits stay in `Source.previous-*\`: run `FixReview` again or copy them across, and run `MapInstances` again.
 
 After you fix something (add a sealed original, install a Microsoft pack and re-export the target, edit `GroupConversion.csv`), run `Compile` again, then `DryRun`, then `Import` or `Reimport`.
 
